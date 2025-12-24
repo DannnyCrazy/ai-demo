@@ -19,20 +19,41 @@ interface ScrapedData {
 const ScrapingButton: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false)
   const [status, setStatus] = useState("")
+  const [showConfirm, setShowConfirm] = useState(false)
+  const [foundModelIds, setFoundModelIds] = useState<string[]>([])
 
-  const scrapeData = async () => {
+  const checkModels = async () => {
     setIsLoading(true)
-    setStatus("正在爬取数据...")
+    setStatus("正在扫描页面...")
 
     try {
       // Step 1: Get model IDs from the page
-      setStatus("获取模型列表...")
       const modelIds = await getModelIds()
       
       if (modelIds.length === 0) {
         throw new Error("未找到模型数据")
       }
 
+      setFoundModelIds(modelIds)
+      setShowConfirm(true)
+      setStatus("")
+    } catch (error) {
+      console.error("扫描失败:", error)
+      setStatus(`错误: ${error instanceof Error ? error.message : "未知错误"}`)
+      setTimeout(() => setStatus(""), 5000)
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  const startDownload = async () => {
+    setShowConfirm(false)
+    setIsLoading(true)
+    setStatus("准备开始下载...")
+
+    try {
+      const modelIds = foundModelIds
+      
       // Step 2: Get detailed info for each model
       setStatus(`正在获取 ${modelIds.length} 个模型的详细信息...`)
       const models: ModelInfo[] = []
@@ -75,21 +96,89 @@ const ScrapingButton: React.FC = () => {
     }
   }
 
-  const getModelIds = async (): Promise<string[]> => {
-    // Try to find model IDs from the current page
-    // This is a placeholder - implement based on actual page structure
+  const extractSeedModelId = (): string | null => {
+    // 策略 1 (优先): 从面包屑导航获取
+    // 用户指定: 取 .el-breadcrumb 下最后一个 el-breadcrumb__item 的内容
     try {
+      const items = document.querySelectorAll(".el-breadcrumb .el-breadcrumb__item")
+      if (items.length > 0) {
+        const lastItem = items[items.length - 1]
+        // Element UI 的面包屑文本通常在 .el-breadcrumb__inner 中，但也可能直接在 item 下
+        const textContainer = lastItem.querySelector(".el-breadcrumb__inner") || lastItem
+        const text = textContainer.textContent?.trim()
+        
+        if (text) {
+          console.log(`从面包屑获取到 ID 参数: ${text}`)
+          return text
+        }
+      }
+    } catch (e) {
+      console.warn("从面包屑获取ID失败", e)
+    }
+
+    // 策略 2: 尝试从页面文本中找到形如 "10B20-1513" 的ID
+    // 这种ID通常由 数字字母-数字 组成
+    const bodyText = document.body.innerText
+    // 匹配形如 10B20-1513 的模式
+    const regex = /\b[0-9A-Z]+-\d+\b/g
+    const matches = bodyText.match(regex)
+    
+    if (matches && matches.length > 0) {
+      // 返回第一个匹配项，或者出现频率最高的项
+      return matches[0]
+    }
+    
+    // 策略 3: 尝试从URL参数获取
+    const urlParams = new URLSearchParams(window.location.hash.split('?')[1])
+    const type3 = urlParams.get('type3') // 接口文档中的 pathstr 包含 type3=10B20-1513
+    if (type3) return type3
+
+    return null
+  }
+
+  const getModelIds = async (): Promise<string[]> => {
+    try {
+      // 策略 1: 尝试获取当前页面的一个模型ID，然后通过API获取所有变体
+      const seedModelId = extractSeedModelId()
+      
+      if (seedModelId) {
+        console.log(`找到种子模型ID: ${seedModelId}，尝试通过API获取完整列表...`)
+        try {
+          const response = await fetch(`https://casterfind.com/api/ProductBrowse/SearchByModeltype?Lang=Chinese&textkey=${seedModelId}`)
+          if (response.ok) {
+            const data: ApiModelDetail = await response.json()
+            if (data.table?.datas) {
+              const allIds: string[] = []
+              data.table.datas.forEach(group => {
+                group.detail?.forEach(item => {
+                  if (item.modeltype) allIds.push(item.modeltype)
+                })
+              })
+              
+              if (allIds.length > 0) {
+                // 去重
+                return [...new Set(allIds)]
+              }
+            }
+          }
+        } catch (e) {
+          console.warn("通过API获取列表失败，回退到页面解析", e)
+        }
+      }
+
+      // 策略 2: 回退到页面解析
       // Look for API calls or data in the page
-      const response = await fetch(window.location.href)
-      const text = await response.text()
+      // 注意：这里不再 fetch(window.location.href)，而是直接解析 DOM
       
-      // Try to extract model IDs from the page content
-      // This regex looks for common patterns
-      const modelIdPattern = /["']modelId["']\s*:\s*["']([^"']+)["']/g
-      const matches = [...text.matchAll(modelIdPattern)]
-      
-      if (matches.length > 0) {
-        return matches.map(match => match[1])
+      // Try to extract model IDs from the page content (script tags, etc)
+      const scripts = document.querySelectorAll("script")
+      for (const script of scripts) {
+        const text = script.textContent || ""
+        const modelIdPattern = /["']modelId["']\s*:\s*["']([^"']+)["']/g
+        const matches = [...text.matchAll(modelIdPattern)]
+        if (matches.length > 0) {
+          return matches.map(match => match[1])
+        }
       }
       
       // Fallback: try to find in window object
@@ -98,7 +187,6 @@ const ScrapingButton: React.FC = () => {
         return modelIds
       }
       
-      // If nothing found, return empty array
       return []
     } catch (error) {
       console.error("获取模型ID失败:", error)
@@ -255,45 +343,109 @@ const ScrapingButton: React.FC = () => {
   }
 
   return (
-    <button
-      onClick={scrapeData}
-      disabled={isLoading}
-      style={{
-        position: "fixed",
-        bottom: "20px",
-        right: "20px",
-        zIndex: 9999,
-        backgroundColor: isLoading ? "#6b7280" : "#3b82f6",
-        color: "white",
-        padding: "10px 20px",
-        borderRadius: "8px",
-        border: "none",
-        boxShadow: "0 4px 6px rgba(0, 0, 0, 0.1)",
-        cursor: isLoading ? "not-allowed" : "pointer",
-        fontSize: "14px",
-        fontWeight: "500",
-        transition: "all 0.2s ease"
-      }}
-      onMouseEnter={(e) => {
-        if (!isLoading) {
-          e.currentTarget.style.backgroundColor = "#2563eb"
-        }
-      }}
-      onMouseLeave={(e) => {
-        if (!isLoading) {
-          e.currentTarget.style.backgroundColor = "#3b82f6"
-        }
-      }}
-    >
-      {isLoading ? (
-        <span style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-          <span style={{ animation: "spin 1s linear infinite" }}>⏳</span>
-          {status || "正在爬取..."}
-        </span>
-      ) : (
-        "爬取该页面数据"
+    <>
+      {showConfirm && (
+        <div style={{
+          position: "fixed",
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: "rgba(0, 0, 0, 0.5)",
+          zIndex: 10000,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center"
+        }}>
+          <div style={{
+            backgroundColor: "white",
+            padding: "24px",
+            borderRadius: "12px",
+            boxShadow: "0 4px 20px rgba(0, 0, 0, 0.2)",
+            maxWidth: "320px",
+            width: "90%",
+            textAlign: "center"
+          }}>
+            <h3 style={{ margin: "0 0 12px 0", color: "#1f2937", fontSize: "18px" }}>确认下载</h3>
+            <p style={{ margin: "0 0 20px 0", color: "#4b5563", fontSize: "14px" }}>
+              在当前页面发现了 <strong>{foundModelIds.length}</strong> 个可下载的模型。
+              是否立即开始下载？
+            </p>
+            <div style={{ display: "flex", gap: "12px", justifyContent: "center" }}>
+              <button
+                onClick={() => setShowConfirm(false)}
+                style={{
+                  padding: "8px 16px",
+                  borderRadius: "6px",
+                  border: "1px solid #d1d5db",
+                  backgroundColor: "white",
+                  color: "#374151",
+                  cursor: "pointer",
+                  fontSize: "14px"
+                }}
+              >
+                取消
+              </button>
+              <button
+                onClick={startDownload}
+                style={{
+                  padding: "8px 16px",
+                  borderRadius: "6px",
+                  border: "none",
+                  backgroundColor: "#3b82f6",
+                  color: "white",
+                  cursor: "pointer",
+                  fontSize: "14px",
+                  fontWeight: "500"
+                }}
+              >
+                确认下载
+              </button>
+            </div>
+          </div>
+        </div>
       )}
-    </button>
+
+      <button
+        onClick={checkModels}
+        disabled={isLoading}
+        style={{
+          position: "fixed",
+          bottom: "20px",
+          right: "20px",
+          zIndex: 9999,
+          backgroundColor: isLoading ? "#6b7280" : "#3b82f6",
+          color: "white",
+          padding: "10px 20px",
+          borderRadius: "8px",
+          border: "none",
+          boxShadow: "0 4px 6px rgba(0, 0, 0, 0.1)",
+          cursor: isLoading ? "not-allowed" : "pointer",
+          fontSize: "14px",
+          fontWeight: "500",
+          transition: "all 0.2s ease"
+        }}
+        onMouseEnter={(e) => {
+          if (!isLoading) {
+            e.currentTarget.style.backgroundColor = "#2563eb"
+          }
+        }}
+        onMouseLeave={(e) => {
+          if (!isLoading) {
+            e.currentTarget.style.backgroundColor = "#3b82f6"
+          }
+        }}
+      >
+        {isLoading ? (
+          <span style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <span style={{ animation: "spin 1s linear infinite" }}>⏳</span>
+            {status || "正在扫描..."}
+          </span>
+        ) : (
+          "查询可下载模型"
+        )}
+      </button>
+    </>
   )
 }
 
