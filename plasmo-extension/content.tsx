@@ -1,8 +1,13 @@
 import axios from "axios"
 import JSZip from "jszip"
+import type { PlasmoCSConfig } from "plasmo"
 import React, { useEffect, useState } from "react"
 import { createRoot } from "react-dom/client"
 import * as XLSX from "xlsx"
+
+export const config: PlasmoCSConfig = {
+  matches: ["https://casterfind.com/*"]
+}
 
 interface ModelInfo {
   id: string
@@ -91,6 +96,27 @@ const ScrapingButton: React.FC = () => {
   const [showConfirm, setShowConfirm] = useState(false)
   const [foundModelIds, setFoundModelIds] = useState<string[]>([])
   const [progress, setProgress] = useState(0)
+  const [buttonText, setButtonText] = useState("查询可下载模型")
+
+  useEffect(() => {
+    const updateButtonText = () => {
+      const fourName = sessionStorage.getItem("fourName")
+      setButtonText(fourName ? `查询【${fourName}】模型` : "查询可下载模型")
+    }
+
+    updateButtonText()
+
+    // Add event listener for storage changes
+    window.addEventListener("storage", updateButtonText)
+
+    // Also poll periodically as sessionStorage changes within same tab don't trigger storage event
+    const intervalId = setInterval(updateButtonText, 1000)
+
+    return () => {
+      window.removeEventListener("storage", updateButtonText)
+      clearInterval(intervalId)
+    }
+  }, [])
 
   const checkModels = async () => {
     setIsLoading(true)
@@ -711,7 +737,7 @@ const ScrapingButton: React.FC = () => {
             {status || "正在扫描..."}
           </span>
         ) : (
-          "查询可下载模型"
+          buttonText
         )}
       </button>
     </>
@@ -720,17 +746,24 @@ const ScrapingButton: React.FC = () => {
 
 // Inject the button into the page
 const injectButton = () => {
-  // Check if button already exists
-  if (document.getElementById("plasmo-scraping-button")) {
-    return
+  const containerId = "plasmo-scraping-button"
+  const existingContainer = document.getElementById(containerId)
+  const hasXLList = !!sessionStorage.getItem("XLList")
+
+  if (hasXLList) {
+    if (!existingContainer) {
+      const container = document.createElement("div")
+      container.id = containerId
+      document.body.appendChild(container)
+
+      const root = createRoot(container)
+      root.render(<ScrapingButton />)
+    }
+  } else {
+    if (existingContainer) {
+      existingContainer.remove()
+    }
   }
-
-  const container = document.createElement("div")
-  container.id = "plasmo-scraping-button"
-  document.body.appendChild(container)
-
-  const root = createRoot(container)
-  root.render(<ScrapingButton />)
 }
 
 // Initialize when DOM is ready
@@ -747,6 +780,9 @@ new MutationObserver(() => {
   if (url !== lastUrl) {
     lastUrl = url
     setTimeout(injectButton, 1000) // Wait for page to settle
+  } else {
+    // Check on DOM updates too, in case sessionStorage changed without URL change
+    injectButton()
   }
 }).observe(document, { subtree: true, childList: true })
 
